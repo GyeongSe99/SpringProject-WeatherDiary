@@ -1,12 +1,20 @@
 package com.zerobase.weatherdiary.service;
 
+import com.zerobase.weatherdiary.WeatherDiaryApplication;
+import com.zerobase.weatherdiary.domain.DateWeather;
 import com.zerobase.weatherdiary.domain.Diary;
+import com.zerobase.weatherdiary.error.DiaryException;
+import com.zerobase.weatherdiary.repository.DateWeatherRepository;
 import com.zerobase.weatherdiary.repository.DiaryRepository;
+import com.zerobase.weatherdiary.type.ErrorCode;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,33 +32,80 @@ import java.util.Map;
 public class DiaryService {
     @Value("${openweathermap.key}")
     private String apiKey;
-
     private final DiaryRepository diaryRepository;
+    private final DateWeatherRepository dateWeatherRepository;
 
-    public DiaryService(DiaryRepository diaryRepository) {
+    private static final Logger logger = LoggerFactory.getLogger(WeatherDiaryApplication.class);
+
+    public DiaryService(DiaryRepository diaryRepository, DateWeatherRepository dateWeatherRepository) {
         this.diaryRepository = diaryRepository;
+        this.dateWeatherRepository = dateWeatherRepository;
+    }
+
+    @Transactional
+    @Scheduled(cron = "0 0 1 * * *")
+    public void saveWeatherDate() {
+        dateWeatherRepository.save(getWeatherFromApi());
+        logger.info("오늘도 날씨 데이터 잘 가져옴");
     }
 
     @Transactional(isolation = Isolation.SERIALIZABLE)
     public void createDiary(LocalDate date, String text) {
+        logger.info("started to create diary");
+        // db에서 날씨 데이터 가져오기
+        DateWeather dateWeather = getDateWeather(date);
+
+
+        // 파싱된 데이터 + 일기 값 db에 넣기
+        Diary nowDiary = new Diary();
+        nowDiary.setDateWeather(dateWeather);
+        nowDiary.setText(text);
+        nowDiary.setDate(date);
+        diaryRepository.save(nowDiary);
+        logger.info("end to create diary");
+
+    }
+    @Transactional(readOnly = true)
+    public List<Diary> readDiary(LocalDate date) {
+        if (date.isAfter(LocalDate.ofYearDay(2200, 1))) {
+            throw new DiaryException(ErrorCode.TOO_FAR_FUTURE);
+        }
+
+        List<Diary> diaryList = diaryRepository.findAllByDate(date);
+
+        if (diaryList.isEmpty()) {
+            throw new DiaryException(ErrorCode.EMPTY_DIARY_LIST);
+        }
+
+        return diaryList;
+    }
+
+    private DateWeather getWeatherFromApi() {
         // open weather map에서 날씨 데이터 가져오기
         String weatherData = getWeatherString();
 
         //받아온 날씨 json 파싱하기
         Map<String, Object> parsedWeather = parseWeather(weatherData);
 
-        // 파싱된 데이터 + 일기 값 db에 넣기
-        Diary nowDiary = new Diary();
-        nowDiary.setWeather(parsedWeather.get("main").toString());
-        nowDiary.setIcon(parsedWeather.get("icon").toString());
-        nowDiary.setTemperature((Double) parsedWeather.get("temp"));
-        nowDiary.setText(text);
-        nowDiary.setDate(date);
-        diaryRepository.save(nowDiary);
+        DateWeather dateWeather = new DateWeather();
+
+        dateWeather.setDate(LocalDate.now());
+        dateWeather.setWeather(parsedWeather.get("main").toString());
+        dateWeather.setIcon(parsedWeather.get("icon").toString());
+        dateWeather.setTemperature((Double) parsedWeather.get("temp"));
+
+        return dateWeather;
     }
-    @Transactional(readOnly = true)
-    public List<Diary> readDiary(LocalDate data) {
-        return diaryRepository.findAllByDate(data);
+
+    private DateWeather getDateWeather(LocalDate date) {
+        List<DateWeather> dateWeatherList = dateWeatherRepository.findAllByDate(date);
+        if (dateWeatherList.size() == 0) {
+            // db에 날씨 정보가 저장되어있지 않을때,
+            return getWeatherFromApi();
+        } else {
+            // db에 날씨 정보가 저장되어 있을때,
+            return dateWeatherList.get(0);
+        }
     }
 
     @Transactional(readOnly = true)
